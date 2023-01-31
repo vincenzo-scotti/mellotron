@@ -5,14 +5,14 @@ import torch
 from torch.autograd import Variable
 from torch import nn
 from torch.nn import functional as F
-from layers import ConvNorm, LinearNorm
-from utils import to_gpu, get_mask_from_lengths
-from modules import GST
+from .layers import ConvNorm, LinearNorm
+from .utils import to_gpu, get_mask_from_lengths
+from .modules import GST
 
 drop_rate = 0.5
 
 def load_model(hparams):
-    model = Tacotron2(hparams).cuda()
+    model = Tacotron2(hparams).to(hparams.device)
     if hparams.fp16_run:
         model.decoder.attention_layer.score_mask_value = finfo('float16').min
 
@@ -634,10 +634,28 @@ class Tacotron2(nn.Module):
         embedded_speakers = self.speaker_embedding(speaker_ids)[:, None]
         if hasattr(self, 'gst'):
             if isinstance(style_input, int):
-                query = torch.zeros(1, 1, self.gst.encoder.ref_enc_gru_size).cuda()
+                query = torch.zeros(1, 1, self.gst.encoder.ref_enc_gru_size, device=self.gst.stl.embed.device)
                 GST = torch.tanh(self.gst.stl.embed)
                 key = GST[style_input].unsqueeze(0).expand(1, -1, -1)
                 embedded_gst = self.gst.stl.attention(query, key)
+            elif style_input.size() == (1, self.gst.stl.embed.size(0)):  # Distribution of style tokens
+                raw_embeds = torch.tanh(self.gst.stl.embed).expand(1, -1, -1)
+                values = self.gst.stl.attention.W_value(raw_embeds)
+                embedded_gst = torch.matmul(style_input, values)
+            elif style_input.size() == (self.gst.stl.attention.num_heads, 1, 1, self.gst.stl.embed.size(0)):  # Multi-head distribution of style tokens
+                raw_embeds = torch.tanh(self.gst.stl.embed).expand(1, -1, -1)
+                values = torch.stack(
+                    torch.split(
+                        self.gst.stl.attention.W_value(raw_embeds),
+                        self.gst.stl.attention.num_units // self.gst.stl.attention.num_heads,
+                        dim=2
+                    ), dim=0
+                )
+                embedded_gst = torch.cat(torch.split(torch.matmul(style_input, values), 1, dim=0), dim=3).squeeze(0)
+            elif style_input.size() == (1, self.gst.encoder.ref_enc_gru_size):  # Prosody encoding
+                embedded_gst = self.gst.stl(style_input)
+            elif style_input.size() == (1, self.gst.stl.attention.num_units):  # Style embedding
+                embedded_gst = style_input
             else:
                 embedded_gst = self.gst(style_input)
 
@@ -666,10 +684,28 @@ class Tacotron2(nn.Module):
         embedded_speakers = self.speaker_embedding(speaker_ids)[:, None]
         if hasattr(self, 'gst'):
             if isinstance(style_input, int):
-                query = torch.zeros(1, 1, self.gst.encoder.ref_enc_gru_size).cuda()
+                query = torch.zeros(1, 1, self.gst.encoder.ref_enc_gru_size, device=self.gst.stl.embed.device)
                 GST = torch.tanh(self.gst.stl.embed)
                 key = GST[style_input].unsqueeze(0).expand(1, -1, -1)
                 embedded_gst = self.gst.stl.attention(query, key)
+            elif style_input.size() == (1, self.gst.stl.embed.size(0)):  # Distribution of style tokens
+                raw_embeds = torch.tanh(self.gst.stl.embed).expand(1, -1, -1)
+                values = self.gst.stl.attention.W_value(raw_embeds)
+                embedded_gst = torch.matmul(style_input, values)
+            elif style_input.size() == (self.gst.stl.attention.num_heads, 1, 1, self.gst.stl.embed.size(0)):  # Multi-head distribution of style tokens
+                raw_embeds = torch.tanh(self.gst.stl.embed).expand(1, -1, -1)
+                values = torch.stack(
+                    torch.split(
+                        self.gst.stl.attention.W_value(raw_embeds),
+                        self.gst.stl.attention.num_units // self.gst.stl.attention.num_heads,
+                        dim=2
+                    ), dim=0
+                )
+                embedded_gst = torch.cat(torch.split(torch.matmul(style_input, values), 1, dim=0), dim=3).squeeze(0)
+            elif style_input.size() == (1, self.gst.encoder.ref_enc_gru_size):  # Prosody encoding
+                embedded_gst = self.gst.stl(style_input)
+            elif style_input.size() == (1, self.gst.stl.attention.num_units):  # Style embedding
+                embedded_gst = style_input
             else:
                 embedded_gst = self.gst(style_input)
 
